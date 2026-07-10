@@ -1,0 +1,10 @@
+data-raw/
+output/
+analysis/qc_out/
+.venv/
+__pycache__/
+*.pyc
+stats/renv/library/
+.Rhistory
+.RData
+.DS_Store
