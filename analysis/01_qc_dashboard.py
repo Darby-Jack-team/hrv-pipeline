@@ -11,13 +11,13 @@ This is a DIAGNOSTIC / REPORTING tool. It flags and visualizes quality issues
 but NEVER modifies or silently drops raw data. Failed/excluded windows are
 *flagged*, not deleted. Exclusion decisions are made downstream.
 
-Run inside the `graphs-ecg` conda env:
+Run with the project's Python environment (see README.md for setup):
 
-    conda run -n graphs-ecg python analysis/01_qc_dashboard.py \
-        --ecg data-raw/.../<file>.csv --deployment-id June14_electrode
+    .venv/bin/python analysis/01_qc_dashboard.py \
+        --ecg data-raw/.../<file>.csv --deployment-id june14_electrode
 
     # quick smoke test on the first 20 minutes:
-    conda run -n graphs-ecg python analysis/01_qc_dashboard.py --limit-seconds 1200
+    .venv/bin/python analysis/01_qc_dashboard.py --ecg <file>.csv --limit-seconds 1200
 
 
 Hardware / study context (these drive several design choices below)

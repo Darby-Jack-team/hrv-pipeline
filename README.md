@@ -43,10 +43,35 @@ data-raw/             raw device exports (gitignored, never committed)
 Requires Python 3.10+.
 
 ```bash
+git clone <this-repo-url>
+cd hrv-pipeline
 python3 -m venv .venv
 source .venv/bin/activate
 pip install neurokit2 numpy scipy pandas pyarrow matplotlib pytest
 ```
+
+Then drop your raw device exports under `data-raw/<deployment-name>/` (this
+directory is gitignored — nothing under it is ever committed) and you're
+ready to run the pipeline below.
+
+Before committing anything, double-check no raw data snuck into git:
+
+```bash
+git ls-files | grep -i csv   # must return nothing
+```
+
+## Input data
+
+Raw exports come from the [Movesense device](https://bitbucket.org/movesense/movesense-device-lib/downloads/)
+as one CSV per signal, named `..._log-1-<signal>_<rate>hz_cid<n>.csv`, e.g.:
+
+- `..._ecg_256hz_cid67.csv` — single-lead ECG (`timestamp`, `ecg` columns)
+- `..._acc_26hz_cid64.csv` — 3-axis accelerometer (`timestamp`, `ax`, `ay`, `az`)
+- `..._hr_13hz_cid74.csv` — device-computed heart rate (not used by this pipeline)
+
+Point `--ecg` / `--accel` at the ECG and accelerometer files for one
+deployment; column and sampling-rate names can be overridden via CLI flags
+if your export differs (see Usage below).
 
 ## Usage
 
