@@ -4,7 +4,7 @@
 
 Run with the project venv so pandas/numpy are available:
 
-    .venv/bin/python analysis/00_inspect.py [path/to/file.csv]
+    .venv/bin/python analysis/00_inspect.py path/to/file.csv
 
 Reports, in plain language:
   - column names and dtypes
@@ -23,10 +23,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-DEFAULT_FILE = (
-    "data-raw/Darby_test_June13/_darbytestJune13-log-1-ecg_256hz_cid67.csv"
-)
 
 
 def human_duration(seconds: float) -> str:
@@ -206,4 +202,6 @@ def main(path: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_FILE)
+    if len(sys.argv) < 2:
+        sys.exit("usage: 00_inspect.py <path/to/ecg_file.csv>")
+    main(sys.argv[1])

@@ -88,10 +88,8 @@ RNG = np.random.default_rng(RNG_SEED)
 @dataclass
 class Config:
     # --- Input ------------------------------------------------------------
-    ecg_path: str = (
-        "data-raw/Darby_test_June14-electrode/"
-        "_darbytestJune14-electrode-log-1-ecg_256hz_cid67.csv"
-    )
+    # No default: every run must pass --ecg explicitly (see main()).
+    ecg_path: Optional[str] = None
     ecg_col: str = "ecg"
     timestamp_col: str = "timestamp"
     sampling_rate: int = 256  # Hz. SPEC nominal = 512; THESE files are 256.
@@ -99,7 +97,7 @@ class Config:
     # file's own median sample interval. Beyond this -> fail loudly.
     sampling_rate_tol_pct: float = 5.0
 
-    deployment_id: str = "June14_electrode"
+    deployment_id: str = "deployment"
 
     # Timezone used for every human-readable time in the report (banner, console,
     # PDF, time-of-day panel). The raw timestamps are parsed as UTC and converted
@@ -108,11 +106,9 @@ class Config:
 
     # --- Optional accelerometer (separate file in this project) -----------
     # If present, used for a per-window motion-burden flag. 3-axis (ax,ay,az)
-    # or 9-axis; we use the first 3 as linear acceleration.
-    accel_path: Optional[str] = (
-        "data-raw/Darby_test_June14-electrode/"
-        "_darbytestJune14-electrode-log-1-acc_13hz_cid63.csv"
-    )
+    # or 9-axis; we use the first 3 as linear acceleration. Pass --accel, or
+    # leave unset / pass --no-accel to skip motion-burden flagging.
+    accel_path: Optional[str] = None
     accel_cols: tuple[str, ...] = ("ax", "ay", "az")
     accel_timestamp_col: str = "timestamp"
     # Motion burden = fraction of the window whose |accel-magnitude minus 1g|
@@ -148,8 +144,9 @@ class Config:
     # ADC counts whose gain varies by deployment, so the floor is RELATIVE: a
     # window is flatline if its robust peak-to-peak amplitude (p99-p1 of the clean
     # signal) falls below this fraction of the recording's MEDIAN window amplitude.
-    # Calibrated on Darby_June14: clean ~2350 ADC, dropout ~175 ADC; 0.15*median
-    # cleanly separates them. Robust as long as <50% of the record is flat.
+    # Calibrated on a pilot deployment: clean ~2350 ADC, dropout ~175 ADC;
+    # 0.15*median cleanly separates them. Robust as long as <50% of the record
+    # is flat. Re-tune this if your device reports amplitude in different units.
     flatline_rel_frac: float = 0.15
 
     # --- Not-worn (device off body) detector ------------------------------
@@ -158,8 +155,8 @@ class Config:
     # the ECG is flatline. Requiring both avoids mislabelling quiet sleep (which is
     # low-motion but still has a heartbeat) as not-worn. The accel threshold is the
     # per-window std of accelerometer magnitude (g); below this the sensor is
-    # "still". Calibrated on Darby_June14 (worn median std ~0.013 g, noise floor
-    # ~0.003 g).
+    # "still". Calibrated on a pilot deployment (worn median std ~0.013 g,
+    # noise floor ~0.003 g).
     not_worn_accel_std_g: float = 0.006
 
     # --- Pediatric RR sanity bounds (ms) ----------------------------------
@@ -1335,12 +1332,14 @@ def main(argv: Optional[list[str]] = None) -> None:
     cfg = Config()
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--ecg", dest="ecg_path", default=cfg.ecg_path)
+    p.add_argument("--ecg", dest="ecg_path", required=True,
+                   help="Path to the raw ECG CSV (required).")
     p.add_argument("--ecg-col", dest="ecg_col", default=cfg.ecg_col)
     p.add_argument("--ts-col", dest="timestamp_col", default=cfg.timestamp_col)
     p.add_argument("--fs", dest="sampling_rate", type=int, default=cfg.sampling_rate)
     p.add_argument("--deployment-id", dest="deployment_id", default=cfg.deployment_id)
-    p.add_argument("--accel", dest="accel_path", default=cfg.accel_path)
+    p.add_argument("--accel", dest="accel_path", default=cfg.accel_path,
+                   help="Path to the accelerometer CSV (optional).")
     p.add_argument("--no-accel", action="store_true")
     # ABPM exclusion is off by default (deferred until a real cuff schedule
     # exists). Opt back in with --abpm.
