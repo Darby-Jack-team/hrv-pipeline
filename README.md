@@ -99,6 +99,7 @@ Useful flags (see `--help` for the full list):
 | Flag | Purpose |
 |---|---|
 | `--fs` | Override the expected sampling rate (default 256 Hz) |
+| `--local-tz` | Display timezone (`+00:00`, `America/New_York`, ...) — by default it's auto-inferred from the UTC offset already embedded in the file's timestamps, so this rarely needs setting |
 | `--no-accel` | Skip accelerometer-based motion flagging |
 | `--abpm` | Enable ABPM cuff-inflation exclusion windows (off by default) |
 | `--limit-seconds` | Process only the first N seconds — useful for a quick smoke test |

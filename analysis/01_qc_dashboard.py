@@ -102,7 +102,12 @@ class Config:
     # Timezone used for every human-readable time in the report (banner, console,
     # PDF, time-of-day panel). The raw timestamps are parsed as UTC and converted
     # to this zone for display.
-    local_tz: str = "America/New_York"
+    # None (default) = auto-infer from the UTC offset embedded in the file's own
+    # timestamps (e.g. "-04:00" for a US Eastern deployment, "+00:00" for Ghana)
+    # -- no per-country configuration needed. Pass --local-tz to override with a
+    # fixed offset ("+00:00") or an IANA zone name ("America/New_York") for
+    # calendar-correct DST handling.
+    local_tz: Optional[str] = None
 
     # --- Optional accelerometer (separate file in this project) -----------
     # If present, used for a per-window motion-burden flag. 3-axis (ax,ay,az)
@@ -196,6 +201,20 @@ def fail(msg: str) -> "None":
     sys.exit(2)
 
 
+def infer_utc_offset_str(raw_timestamp: str) -> Optional[str]:
+    """Extract the UTC offset embedded in one raw ISO8601 timestamp string
+    (e.g. "2026-07-10T06:25:55.000-04:00" -> "-04:00") as a fixed-offset
+    string pandas' tz_convert() accepts directly. Returns None if the string
+    carries no offset (e.g. a bare "Z"/naive timestamp)."""
+    offset = pd.Timestamp(raw_timestamp).utcoffset()
+    if offset is None:
+        return None
+    total_min = int(offset.total_seconds() // 60)
+    sign = "+" if total_min >= 0 else "-"
+    hh, mm = divmod(abs(total_min), 60)
+    return f"{sign}{hh:02d}:{mm:02d}"
+
+
 def section(title: str) -> None:
     print()
     print("=" * 78)
@@ -255,6 +274,31 @@ def load_and_validate_ecg(cfg: Config) -> LoadedECG:
         )
         sig = sig.ffill().bfill()
     signal = sig.to_numpy(dtype=float)
+
+    # Timezone for display: infer from the file's own timestamps unless the
+    # caller passed --local-tz explicitly. Each raw row carries the device
+    # clock's UTC offset at capture time, so this adapts automatically across
+    # deployment countries (e.g. Ghana vs US) with no configuration.
+    if cfg.local_tz is None:
+        off_first = infer_utc_offset_str(str(df[cfg.timestamp_col].iloc[0]))
+        off_last = infer_utc_offset_str(str(df[cfg.timestamp_col].iloc[-1]))
+        if off_first is None:
+            fail(
+                f"Cannot auto-infer local_tz: {cfg.timestamp_col!r} has no UTC "
+                f"offset (e.g. {df[cfg.timestamp_col].iloc[0]!r}). "
+                f"Pass --local-tz explicitly."
+            )
+        if off_last != off_first:
+            announce(
+                f"WARNING: UTC offset drifts within this file "
+                f"({off_first} at start -> {off_last} at end; likely a DST "
+                f"transition mid-recording). Using the START offset "
+                f"({off_first}) for all display times."
+            )
+        cfg.local_tz = off_first
+        announce(f"Inferred display timezone from file: UTC{cfg.local_tz}.")
+    else:
+        announce(f"Using explicit --local-tz {cfg.local_tz!r}.")
 
     # Parse timestamps and validate the implied sampling rate.
     ts = pd.to_datetime(df[cfg.timestamp_col], utc=True, format="ISO8601")
@@ -1338,6 +1382,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     p.add_argument("--ts-col", dest="timestamp_col", default=cfg.timestamp_col)
     p.add_argument("--fs", dest="sampling_rate", type=int, default=cfg.sampling_rate)
     p.add_argument("--deployment-id", dest="deployment_id", default=cfg.deployment_id)
+    p.add_argument("--local-tz", dest="local_tz", default=cfg.local_tz,
+                   help="Display timezone: fixed offset ('+00:00') or IANA "
+                        "name ('America/New_York'). Default: auto-infer from "
+                        "the UTC offset embedded in the file's timestamps.")
     p.add_argument("--accel", dest="accel_path", default=cfg.accel_path,
                    help="Path to the accelerometer CSV (optional).")
     p.add_argument("--no-accel", action="store_true")
@@ -1354,6 +1402,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     cfg.timestamp_col = args.timestamp_col
     cfg.sampling_rate = args.sampling_rate
     cfg.deployment_id = args.deployment_id
+    cfg.local_tz = args.local_tz
     cfg.accel_path = None if args.no_accel else args.accel_path
     cfg.abpm_enabled = args.abpm
     cfg.out_dir = args.out_dir
