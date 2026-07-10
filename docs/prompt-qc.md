@@ -8,7 +8,7 @@ analysis step: it flags and visualizes quality but never modifies or silently dr
 raw data. Exclusion decisions are downstream.
 
 # Environment & stack
-- Python, run in the `graphs-ecg` conda env. Use neurokit2 for all ECG processing.
+- Python, run in the project's virtual environment. Use neurokit2 for all ECG processing.
 - matplotlib for plotting (no seaborn dependency). numpy/pandas/scipy fine.
 - Record the neurokit2 version in the output for reproducibility. Set a fixed RNG seed.
 
