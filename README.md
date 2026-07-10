@@ -75,13 +75,17 @@ if your export differs (see Usage below).
 
 ## Usage
 
-Sanity-check a raw file before running the full pipeline:
+With the venv active (`source .venv/bin/activate`) and raw files in place under
+`data-raw/<deployment>/`:
+
+**1. Sanity-check the raw file** (optional, but cheap and catches format
+surprises before the full run):
 
 ```bash
 .venv/bin/python analysis/00_inspect.py data-raw/<deployment>/<ecg_file>.csv
 ```
 
-Run the QC dashboard on a full deployment:
+**2. Run the QC dashboard** on the full deployment:
 
 ```bash
 .venv/bin/python analysis/01_qc_dashboard.py \
@@ -90,9 +94,45 @@ Run the QC dashboard on a full deployment:
   --deployment-id <deployment>
 ```
 
-Outputs land in `analysis/qc_out/`: `<deployment>_dashboard.{png,pdf}`,
-`<deployment>_metrics.json`, and an appended row in
-`_deployment_qc_summary.csv`.
+It prints its progress stage-by-stage as it validates the file, detects
+beats, and windows the recording, ending in a summary table and an overall
+verdict:
+
+```
+------------------------------------------------------------------------------
+  DEPLOYMENT QC SUMMARY — example_deployment    [PASS]
+------------------------------------------------------------------------------
+  neurokit2                  0.2.13
+  sampling rate              256 Hz
+  recording start            2026-07-10 06:25:55 UTC-04:00
+  recording end              2026-07-11 05:55:01 UTC-04:00
+  total duration              23.49 h
+  worn duration                23.07 h
+  % analyzable (total)       92.3%  <-- verdict driver
+  % analyzable (worn)        93.9%
+  N beats                    99,517
+  % corrected beats          1.62%
+  mean HR                    80 bpm (40-197)
+  RMSSD / SDNN               59.9 / 219.2 ms
+  windows pass@5% / total    260 / 282
+  windows pass@2% / total    257 / 282
+  ...
+==============================================================================
+DONE — verdict: PASS (92% of total deployment analyzable; 94% of worn time)
+==============================================================================
+```
+
+`% analyzable (total)` — the share of the deployment's SQI-passing windows
+against the *whole* recording — drives the verdict: **PASS** (≥80%),
+**REVIEW** (50–80%), or **FAIL** (<50%). These thresholds live in the
+`Config` dataclass at the top of `01_qc_dashboard.py`, not behind a flag.
+
+**3. Check the outputs** in `analysis/qc_out/`:
+
+- `<deployment>_dashboard.png` / `.pdf` — the two-page visual QC dashboard
+- `<deployment>_metrics.json` — the same numbers, machine-readable
+- `_deployment_qc_summary.csv` — one row per deployment, appended/updated
+  each run (keyed by `--deployment-id`), for comparing across a study
 
 Useful flags (see `--help` for the full list):
 
