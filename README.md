@@ -149,6 +149,7 @@ Useful flags (see `--help` for the full list):
 | `--local-tz` | Display timezone (`+00:00`, `America/New_York`, ...) — by default it's auto-inferred from the UTC offset already embedded in the file's timestamps, so this rarely needs setting |
 | `--no-accel` | Skip accelerometer-based motion flagging |
 | `--abpm` | Enable ABPM cuff-inflation exclusion windows (off by default) |
+| `--ici` | Compute the ICI two-detector-agreement SQI (off by default — doesn't affect the QC verdict, and is the dominant cost of a run: ~40–85 min on a real 23h file) |
 | `--avgqrs` | Compute the secondary averageQRS SQI (off by default — doesn't affect the QC verdict, costs real time on long recordings) |
 | `--limit-seconds` | Process only the first N seconds — useful for a quick smoke test |
 | `--out-dir` | Change the output directory (default `analysis/qc_out/`) |
@@ -162,3 +163,9 @@ Useful flags (see `--help` for the full list):
   versions (see `docs/CLAUDE.md`).
 - `docs/prior-draft.md` is an earlier, unverified draft; don't build on it
   without auditing.
+- Performance: the ICI and averageQRS SQIs are both diagnostic-only (neither
+  drives PASS/REVIEW/FAIL) and off by default, since ICI alone is the
+  dominant cost of a run on a full-day recording. See the `Config.ici_enabled`
+  comment in `01_qc_dashboard.py` for the root cause (an O(n²)-shaped loop
+  inside neurokit2 itself) and a documented-but-not-implemented faster
+  rewrite option.

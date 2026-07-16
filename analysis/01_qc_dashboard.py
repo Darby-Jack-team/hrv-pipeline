@@ -46,12 +46,15 @@ neurokit2 API notes (verified against the installed version, 0.2.x)
   method string has changed across nk versions; "Kubios" is correct here and the
   script asserts it is available at runtime.
 * Signal SQI: nk.ecg_quality(method="ici") is the ho2025/ICI two-detector-
-  agreement metric (PRIMARY gate -- transferable because it does not depend on
-  absolute spectral magnitudes that the 40 Hz cutoff distorts).
-  method="averageQRS" and method="zhao2018" are also available but treated as
-  SECONDARY -- neither drives the QC verdict (see comments at the call sites).
-  averageQRS costs real time on long recordings and is OFF by default for QC
-  runs; pass --avgqrs to compute it.
+  agreement metric (transferable because it does not depend on absolute
+  spectral magnitudes that the 40 Hz cutoff distorts). method="averageQRS"
+  and method="zhao2018" are also available. NONE of the three drive the QC
+  verdict (only % corrected beats from Kubios RR correction does) -- all are
+  diagnostic-only (see comments at the call sites). ICI and averageQRS are
+  OFF by default (ICI is also the dominant cost of a run, ~40-85 min on a
+  real 23h file -- see the Config.ici_enabled comment for the root cause and
+  a not-yet-implemented faster-but-equivalent rewrite option); pass --ici /
+  --avgqrs to compute them anyway.
 """
 
 from __future__ import annotations
@@ -148,6 +151,35 @@ class Config:
     # for a number that's discarded. Off by default; opt in with --avgqrs if
     # you want it reported for extra diagnostic detail.
     avgqrs_enabled: bool = False
+
+    # --- ICI two-detector-agreement SQI (also non-gating) ----------------
+    # Despite being documented/reported as the "PRIMARY" SQI, ici_mean does
+    # NOT drive PASS/REVIEW/FAIL either (only % corrected beats does) -- it's
+    # reported for diagnostic context and used as a tiebreaker for which
+    # window gets shown in the "cleanest window" beat-overlay panel.
+    #
+    # nk.ecg_quality(method="ici") is also the dominant cost of a QC run by
+    # a wide margin: measured at ~40-85 min of an ~85 min total on a real
+    # 23.35h recording (run-to-run variance likely from Dropbox
+    # sync/indexing contention on the raw file). Root cause, found in
+    # neurokit2's own source (_quality_ici() in
+    # site-packages/neurokit2/signal/signal_quality.py): for every detected
+    # beat it does up to three linear `any(... for s in cycles_secondary)`
+    # scans over the other detector's full beat list -- an O(n^2)-shaped
+    # nested Python loop, not something inherent to the QC problem itself.
+    #
+    # OPTION B (not implemented): both beat lists are sorted, so every one
+    # of those `any()` scans is a candidate for np.searchsorted() instead --
+    # O(n log n) instead of O(n^2), same exact result. That would let ICI
+    # stay on by default at a fraction of the cost, but means patching
+    # around third-party internals and validating the rewrite is bit-for-
+    # bit identical to the original across a full real recording before
+    # trusting it (more engineering than flipping this default).
+    #
+    # Off by default; opt in with --ici once you actually need the metric
+    # (e.g. a report that wants two-detector-agreement context), or revisit
+    # Option B if ICI needs to be on by default for every run.
+    ici_enabled: bool = False
 
     # --- Windowing --------------------------------------------------------
     window_s: float = 300.0  # 5-min windows
@@ -486,33 +518,33 @@ def process_ecg(cfg: Config, ecg: LoadedECG) -> Processed:
         fail("Fewer than 3 R-peaks detected; signal is unusable for HRV.")
 
     # --- 2. Signal-level SQI -------------------------------------------
-    # PRIMARY gate: ICI two-detector agreement (transferable; not magnitude-
-    # dependent, so the 40 Hz cutoff does not bias it the way it biases methods
-    # that look at spectral power).
-    quality_ici = np.asarray(
-        nk.ecg_quality(clean, rpeaks=rpeaks, sampling_rate=ecg.fs, method="ici"),
-        dtype=float,
-    )
-    # SECONDARY: averageQRS is RELATIVE (1 == close to the mean beat, which is
-    # NOT the same as "clinically good"). Reported, not gated on -- and, unlike
-    # ici, costs real time on long recordings for a number nothing downstream
-    # uses. Skipped by default for QC runs; pass --avgqrs to compute it anyway.
+    # Neither of these drives the PASS/REVIEW/FAIL verdict (only % corrected
+    # beats from Kubios RR correction does, below) -- both are diagnostic-only
+    # and both are OFF by default so a QC run doesn't pay for numbers the
+    # verdict never uses. See the Config fields (ici_enabled, avgqrs_enabled)
+    # for why, and for ICI specifically the found root cause of its cost and
+    # the not-yet-implemented vectorized-rewrite alternative (Option B).
+    if cfg.ici_enabled:
+        quality_ici = np.asarray(
+            nk.ecg_quality(clean, rpeaks=rpeaks, sampling_rate=ecg.fs, method="ici"),
+            dtype=float,
+        )
+        ici_msg = f"ICI mean={np.nanmean(quality_ici):.3f}"
+    else:
+        quality_ici = np.full(len(clean), np.nan, dtype=float)
+        ici_msg = "ICI skipped (pass --ici to compute it)"
+
     if cfg.avgqrs_enabled:
         quality_avgqrs = np.asarray(
             nk.ecg_quality(clean, rpeaks=rpeaks, sampling_rate=ecg.fs, method="averageQRS"),
             dtype=float,
         )
-        announce(
-            f"SQI: ICI mean={np.nanmean(quality_ici):.3f} (PRIMARY); "
-            f"averageQRS mean={np.nanmean(quality_avgqrs):.3f} (secondary, relative)."
-        )
+        avgqrs_msg = f"averageQRS mean={np.nanmean(quality_avgqrs):.3f}"
     else:
         quality_avgqrs = np.full(len(clean), np.nan, dtype=float)
-        announce(
-            f"SQI: ICI mean={np.nanmean(quality_ici):.3f} (PRIMARY); "
-            f"averageQRS skipped (secondary, not used for QC verdict; "
-            f"pass --avgqrs to compute it)."
-        )
+        avgqrs_msg = "averageQRS skipped (pass --avgqrs to compute it)"
+
+    announce(f"SQI (both diagnostic-only, not verdict inputs): {ici_msg}; {avgqrs_msg}.")
     # zhao2018 is computed PER WINDOW later (it returns one category per segment)
     # and is reported only -- its thresholds were calibrated on full-bandwidth
     # ECG and will misclassify a 40 Hz-limited signal.
@@ -666,7 +698,10 @@ def compute_windows(
 
         # Per-sample SQI averaged over the window.
         s0, s1 = int(t0 * ecg.fs), int(t1 * ecg.fs)
-        ici_mean = float(np.nanmean(quality_ici[s0:s1])) if s1 > s0 else float("nan")
+        ici_mean = (
+            float(np.nanmean(quality_ici[s0:s1]))
+            if (s1 > s0 and cfg.ici_enabled) else float("nan")
+        )
         avgqrs_mean = (
             float(np.nanmean(quality_avgqrs[s0:s1]))
             if (s1 > s0 and cfg.avgqrs_enabled) else float("nan")
@@ -1255,8 +1290,13 @@ def build_dashboard(
     )
 
     # --- Panel 7+8: representative beat overlays -----------------------
+    # ici_mean is only a meaningful tiebreaker when it was actually computed.
+    clean_win_key = (
+        (lambda w: (w.pct_corrected, -w.ici_mean)) if cfg.ici_enabled
+        else (lambda w: w.pct_corrected)
+    )
     clean_win = min((ws for ws in windows if ws.n_beats >= cfg.min_beats_per_window),
-                    key=lambda w: (w.pct_corrected, -w.ici_mean), default=None)
+                    key=clean_win_key, default=None)
     bad_win = max((ws for ws in windows if ws.n_beats >= cfg.min_beats_per_window),
                   key=lambda w: w.pct_corrected, default=None)
 
@@ -1284,8 +1324,9 @@ def build_dashboard(
             axo.plot(np.arange(-half, half) / ecg.fs * 1000.0,
                      proc.clean[a:b], lw=0.4, color="0.5", alpha=0.6)
         axo.axvline(0, color="red", lw=0.6)
+        ici_str = f"{ws.ici_mean:.2f}" if cfg.ici_enabled else "n/a"
         axo.set_title(f"{title}\n{ws.start_dt.tz_convert(cfg.local_tz):%H:%M}, "
-                      f"{ws.pct_corrected:.1f}% corr, ICI={ws.ici_mean:.2f}")
+                      f"{ws.pct_corrected:.1f}% corr, ICI={ici_str}")
         axo.set_xlabel("time around R (ms)")
         axo.set_ylabel("ECG")
         panel_caption(axo, overlay_caption[col])
@@ -1542,8 +1583,13 @@ def main(argv: Optional[list[str]] = None) -> None:
     # exists). Opt back in with --abpm.
     p.add_argument("--abpm", action="store_true",
                    help="Enable ABPM cuff-inflation exclusion (off by default).")
-    # averageQRS is a secondary, non-gating SQI that costs real time on long
-    # recordings for a number nothing downstream uses. Off by default.
+    # ICI and averageQRS are both non-gating SQIs. ICI in particular is the
+    # dominant cost of a run (~40-85 min on a real 23h file) for a number the
+    # verdict never uses -- see Config.ici_enabled for the root cause.
+    p.add_argument("--ici", action="store_true",
+                   help="Compute the ICI two-detector-agreement SQI (off by "
+                        "default -- doesn't affect the QC verdict, and is the "
+                        "dominant cost of a run on long recordings).")
     p.add_argument("--avgqrs", action="store_true",
                    help="Compute the secondary averageQRS SQI (off by "
                         "default -- doesn't affect the QC verdict, costs "
@@ -1560,6 +1606,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     cfg.local_tz = args.local_tz
     cfg.accel_path = None if args.no_accel else args.accel_path
     cfg.abpm_enabled = args.abpm
+    cfg.ici_enabled = args.ici
     cfg.avgqrs_enabled = args.avgqrs
     cfg.out_dir = args.out_dir
     cfg.limit_seconds = args.limit_seconds
