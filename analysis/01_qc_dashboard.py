@@ -1465,7 +1465,13 @@ def write_outputs(
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     row_df = pd.DataFrame([row])
     if csv_path.exists():
-        existing = pd.read_csv(csv_path)
+        # serial_number is an identifier, not a quantity -- read it back as a
+        # string so pandas' numeric type inference doesn't turn it into a
+        # float (e.g. 254530002246 -> 254530002246.0, or worse for longer
+        # serials) on every subsequent run that re-reads and re-appends here.
+        header_cols = pd.read_csv(csv_path, nrows=0).columns
+        dtype_hint = {"serial_number": "string"} if "serial_number" in header_cols else None
+        existing = pd.read_csv(csv_path, dtype=dtype_hint)
         existing = existing[existing["deployment_id"] != cfg.deployment_id]
         out = pd.concat([existing, row_df], ignore_index=True)
     else:
