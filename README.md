@@ -142,6 +142,7 @@ Useful flags (see `--help` for the full list):
 | `--local-tz` | Display timezone (`+00:00`, `America/New_York`, ...) — by default it's auto-inferred from the UTC offset already embedded in the file's timestamps, so this rarely needs setting |
 | `--no-accel` | Skip accelerometer-based motion flagging |
 | `--abpm` | Enable ABPM cuff-inflation exclusion windows (off by default) |
+| `--avgqrs` | Compute the secondary averageQRS SQI (off by default — doesn't affect the QC verdict, costs real time on long recordings) |
 | `--limit-seconds` | Process only the first N seconds — useful for a quick smoke test |
 | `--out-dir` | Change the output directory (default `analysis/qc_out/`) |
 

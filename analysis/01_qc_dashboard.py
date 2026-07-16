@@ -48,8 +48,10 @@ neurokit2 API notes (verified against the installed version, 0.2.x)
 * Signal SQI: nk.ecg_quality(method="ici") is the ho2025/ICI two-detector-
   agreement metric (PRIMARY gate -- transferable because it does not depend on
   absolute spectral magnitudes that the 40 Hz cutoff distorts).
-  method="averageQRS" and method="zhao2018" are also reported but treated as
-  SECONDARY (see comments at the call sites).
+  method="averageQRS" and method="zhao2018" are also available but treated as
+  SECONDARY -- neither drives the QC verdict (see comments at the call sites).
+  averageQRS costs real time on long recordings and is OFF by default for QC
+  runs; pass --avgqrs to compute it.
 """
 
 from __future__ import annotations
@@ -134,6 +136,15 @@ class Config:
     # verdict down on signal that is actually fine. Off by default; opt back in
     # with --abpm (or set this True) once a real schedule exists.
     abpm_enabled: bool = False
+
+    # --- Secondary (non-gating) signal-quality index --------------------
+    # averageQRS is a RELATIVE per-beat morphology-distance metric (see
+    # process_ecg() comments). It does not drive the PASS/REVIEW/FAIL verdict
+    # (that's driven by % corrected beats from Kubios RR correction) and isn't
+    # plotted or exported anywhere -- it costs real time on long recordings
+    # for a number that's discarded. Off by default; opt in with --avgqrs if
+    # you want it reported for extra diagnostic detail.
+    avgqrs_enabled: bool = False
 
     # --- Windowing --------------------------------------------------------
     window_s: float = 300.0  # 5-min windows
@@ -461,15 +472,25 @@ def process_ecg(cfg: Config, ecg: LoadedECG) -> Processed:
         dtype=float,
     )
     # SECONDARY: averageQRS is RELATIVE (1 == close to the mean beat, which is
-    # NOT the same as "clinically good"). Reported, not gated on.
-    quality_avgqrs = np.asarray(
-        nk.ecg_quality(clean, rpeaks=rpeaks, sampling_rate=ecg.fs, method="averageQRS"),
-        dtype=float,
-    )
-    announce(
-        f"SQI: ICI mean={np.nanmean(quality_ici):.3f} (PRIMARY); "
-        f"averageQRS mean={np.nanmean(quality_avgqrs):.3f} (secondary, relative)."
-    )
+    # NOT the same as "clinically good"). Reported, not gated on -- and, unlike
+    # ici, costs real time on long recordings for a number nothing downstream
+    # uses. Skipped by default for QC runs; pass --avgqrs to compute it anyway.
+    if cfg.avgqrs_enabled:
+        quality_avgqrs = np.asarray(
+            nk.ecg_quality(clean, rpeaks=rpeaks, sampling_rate=ecg.fs, method="averageQRS"),
+            dtype=float,
+        )
+        announce(
+            f"SQI: ICI mean={np.nanmean(quality_ici):.3f} (PRIMARY); "
+            f"averageQRS mean={np.nanmean(quality_avgqrs):.3f} (secondary, relative)."
+        )
+    else:
+        quality_avgqrs = np.full(len(clean), np.nan, dtype=float)
+        announce(
+            f"SQI: ICI mean={np.nanmean(quality_ici):.3f} (PRIMARY); "
+            f"averageQRS skipped (secondary, not used for QC verdict; "
+            f"pass --avgqrs to compute it)."
+        )
     # zhao2018 is computed PER WINDOW later (it returns one category per segment)
     # and is reported only -- its thresholds were calibrated on full-bandwidth
     # ECG and will misclassify a 40 Hz-limited signal.
@@ -625,7 +646,8 @@ def compute_windows(
         s0, s1 = int(t0 * ecg.fs), int(t1 * ecg.fs)
         ici_mean = float(np.nanmean(quality_ici[s0:s1])) if s1 > s0 else float("nan")
         avgqrs_mean = (
-            float(np.nanmean(quality_avgqrs[s0:s1])) if s1 > s0 else float("nan")
+            float(np.nanmean(quality_avgqrs[s0:s1]))
+            if (s1 > s0 and cfg.avgqrs_enabled) else float("nan")
         )
 
         # zhao2018 per-window (secondary, reported only). Guard against short/
@@ -1393,6 +1415,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     # exists). Opt back in with --abpm.
     p.add_argument("--abpm", action="store_true",
                    help="Enable ABPM cuff-inflation exclusion (off by default).")
+    # averageQRS is a secondary, non-gating SQI that costs real time on long
+    # recordings for a number nothing downstream uses. Off by default.
+    p.add_argument("--avgqrs", action="store_true",
+                   help="Compute the secondary averageQRS SQI (off by "
+                        "default -- doesn't affect the QC verdict, costs "
+                        "real time on long recordings).")
     p.add_argument("--out-dir", dest="out_dir", default=cfg.out_dir)
     p.add_argument("--limit-seconds", dest="limit_seconds", type=float, default=None)
     args = p.parse_args(argv)
@@ -1405,6 +1433,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     cfg.local_tz = args.local_tz
     cfg.accel_path = None if args.no_accel else args.accel_path
     cfg.abpm_enabled = args.abpm
+    cfg.avgqrs_enabled = args.avgqrs
     cfg.out_dir = args.out_dir
     cfg.limit_seconds = args.limit_seconds
 
