@@ -102,6 +102,7 @@ verdict:
 ------------------------------------------------------------------------------
   DEPLOYMENT QC SUMMARY — example_deployment    [PASS]
 ------------------------------------------------------------------------------
+  serial number              254530002246
   neurokit2                  0.2.13
   sampling rate              256 Hz
   recording start            2026-07-16 08:19:47 UTC

@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import textwrap
 import time
@@ -74,6 +75,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless / file output
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from matplotlib.patches import Patch
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -227,6 +229,16 @@ def infer_utc_offset_str(raw_timestamp: str) -> Optional[str]:
     return f"{sign}{hh:02d}:{mm:02d}"
 
 
+def parse_serial_number(ecg_path: str) -> Optional[str]:
+    """Extract the device serial number from the raw filename: the run of
+    12 digits at the start of the basename (e.g. "254530002246" from
+    "254530002246-log-1-ecg_256hz_cid67.csv"). Returns None if the filename
+    doesn't start with exactly that pattern (e.g. older/renamed exports) --
+    this is informational, not a hard requirement."""
+    m = re.match(r"^(\d{12})(?!\d)", Path(ecg_path).name)
+    return m.group(1) if m else None
+
+
 def section(title: str) -> None:
     print()
     print("=" * 78)
@@ -239,6 +251,15 @@ def local_bounds(cfg: "Config", ecg: "LoadedECG") -> "tuple[pd.Timestamp, pd.Tim
     start = ecg.start_dt.tz_convert(cfg.local_tz)
     end = (ecg.start_dt + timedelta(seconds=ecg.duration_s)).tz_convert(cfg.local_tz)
     return start, end
+
+
+def local_dt_array(cfg: "Config", ecg: "LoadedECG", t_elapsed_s) -> np.ndarray:
+    """Elapsed seconds since recording start -> local wall-clock datetimes,
+    made tz-NAIVE so matplotlib's date axis renders local time directly
+    (a tz-aware array would otherwise get silently redrawn in whatever
+    timezone matplotlib's date machinery defaults to)."""
+    start_local_naive = ecg.start_dt.tz_convert(cfg.local_tz).tz_localize(None)
+    return (start_local_naive + pd.to_timedelta(np.asarray(t_elapsed_s), unit="s")).to_numpy()
 
 
 # =============================================================================
@@ -866,7 +887,7 @@ def panel_caption(ax, text: str) -> None:
 
 def _build_explanation_page(
     cfg: Config, ecg: "LoadedECG", verdict: str, pct_total: float, pct_worn: float,
-    windows: "list[WindowStats]"
+    windows: "list[WindowStats]", serial_number: Optional[str],
 ):
     """Build a portrait 'How to read this report' figure used as PDF page 2.
 
@@ -883,7 +904,8 @@ def _build_explanation_page(
 
     header = (
         f"How to read this report\n"
-        f"{cfg.deployment_id}   |   verdict: {verdict}   |   "
+        f"{cfg.deployment_id}   |   S/N {serial_number or 'unknown'}   |   "
+        f"verdict: {verdict}   |   "
         f"{pct_total:.0f}% of total analyzable / {pct_worn:.0f}% of worn time\n"
         f"recorded {start_local:%Y-%m-%d %H:%M:%S} → {end_local:%Y-%m-%d %H:%M:%S} "
         f"{tz_abbr}   |   nk {nk.__version__}   |   fs = {ecg.fs} Hz"
@@ -1007,6 +1029,7 @@ def build_dashboard(
     out_pdf: Path,
     elapsed_min: float,
     accel_available: bool,
+    serial_number: Optional[str],
 ) -> None:
     section("STAGE 7 - Dashboard figure")
     banner_color = {"PASS": "#2e7d32", "REVIEW": "#f9a825", "FAIL": "#c62828"}[verdict]
@@ -1032,15 +1055,21 @@ def build_dashboard(
         fontsize=30, fontweight="bold", color="white",
     )
     axb.text(
-        0.99, 0.70,
-        f"{cfg.deployment_id}   |   {pct_total:.0f}% analyzable of total   |   "
-        f"{pct_worn:.0f}% analyzable of worn time   |   "
+        0.99, 0.80,
+        f"{cfg.deployment_id}   |   S/N {serial_number or 'unknown'}   |   "
         f"nk {nk.__version__}   |   fs={ecg.fs} Hz   ",
         transform=axb.transAxes, va="center", ha="right",
         fontsize=12, color="white",
     )
     axb.text(
-        0.99, 0.28,
+        0.99, 0.50,
+        f"{pct_total:.0f}% analyzable of total   |   "
+        f"{pct_worn:.0f}% analyzable of worn time   ",
+        transform=axb.transAxes, va="center", ha="right",
+        fontsize=12, color="white",
+    )
+    axb.text(
+        0.99, 0.20,
         f"recorded {start_local:%Y-%m-%d %H:%M:%S} → "
         f"{end_local:%Y-%m-%d %H:%M:%S} {tz_abbr}   |   "
         f"processed in {elapsed_min:.1f} min   ",
@@ -1048,20 +1077,32 @@ def build_dashboard(
         fontsize=11, color="white",
     )
 
-    win_t = np.array([ws.t0_s / 60.0 for ws in windows])  # minutes
+    # Local wall-clock time per window (start and end), used for every
+    # time-based x-axis below so the dashboard reads in local time, not
+    # elapsed minutes.
+    win_t0_dt = local_dt_array(cfg, ecg, np.array([ws.t0_s for ws in windows]))
+    win_t1_dt = local_dt_array(cfg, ecg, np.array([ws.t1_s for ws in windows]))
+    win_dt = win_t0_dt  # one point per window (its start), for scatter/line plots
     pct_corr = np.array([ws.pct_corrected for ws in windows])
     rmssd = np.array([ws.rmssd_ms for ws in windows])
     excluded = np.array([ws.abpm_excluded for ws in windows])
     passed = np.array([ws.pass_primary for ws in windows])
 
+    def _set_local_time_axis(ax) -> None:
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        ax.set_xlabel(f"Local time ({tz_abbr})")
+
     # --- Panel 1: timeline with color-coded quality --------------------
     ax1 = fig.add_subplot(gs[1, :])
     # Downsample the raw clean signal for plotting only.
     step = max(1, len(proc.clean) // 6000)
-    ax1.plot(ecg.t_elapsed[::step] / 60.0, proc.clean[::step], lw=0.3, color="0.4")
+    ecg_dt = local_dt_array(cfg, ecg, ecg.t_elapsed[::step])
+    ax1.plot(ecg_dt, proc.clean[::step], lw=0.3, color="0.4")
     has_flatline = any(ws.flatline for ws in windows)
     has_not_worn = any(ws.not_worn for ws in windows)
-    for ws in windows:
+    for i, ws in enumerate(windows):
+        t0_dt, t1_dt = win_t0_dt[i], win_t1_dt[i]
         # Lead-off/flatline (no signal) gets its own colour so it reads as
         # distinct from "noisy" (red) windows.
         if ws.flatline:
@@ -1074,13 +1115,13 @@ def build_dashboard(
             c = "#f9a825"
         else:
             c = "#c62828"
-        ax1.axvspan(ws.t0_s / 60.0, ws.t1_s / 60.0, color=c, alpha=0.18, zorder=0)
+        ax1.axvspan(t0_dt, t1_dt, color=c, alpha=0.18, zorder=0)
         if ws.motion_flagged:
-            ax1.axvspan(ws.t0_s / 60.0, ws.t1_s / 60.0, ymin=0.0, ymax=0.06,
+            ax1.axvspan(t0_dt, t1_dt, ymin=0.0, ymax=0.06,
                         color="purple", alpha=0.5, zorder=3)
         # Not-worn (device idle) is marked with a solid top strip.
         if ws.not_worn:
-            ax1.axvspan(ws.t0_s / 60.0, ws.t1_s / 60.0, ymin=0.94, ymax=1.0,
+            ax1.axvspan(t0_dt, t1_dt, ymin=0.94, ymax=1.0,
                         color="#01579b", alpha=0.8, zorder=3)
     # ABPM inflation lines only appear when a cuff schedule produced windows.
     has_abpm = len(abpm_windows) > 0
@@ -1090,12 +1131,13 @@ def build_dashboard(
     if has_not_worn:
         title_bits.append("not-worn (blue top strip)")
     if has_abpm:
-        for a, b in abpm_windows:
-            ax1.axvline(a / 60.0, color="blue", lw=0.6, alpha=0.5, zorder=2)
+        abpm_starts_dt = local_dt_array(cfg, ecg, np.array([a for a, b in abpm_windows]))
+        for a_dt in abpm_starts_dt:
+            ax1.axvline(a_dt, color="blue", lw=0.6, alpha=0.5, zorder=2)
         title_bits.append("ABPM inflations (blue lines)")
     title_bits.append("motion (purple ticks)")
     ax1.set_title("Full recording — " + ", ".join(title_bits))
-    ax1.set_xlabel("Time (min)")
+    _set_local_time_axis(ax1)
     ax1.set_ylabel("ECG (clean)")
     legend_handles = [
         Patch(color="#2e7d32", alpha=0.4, label=f"<={cfg.accept_pct_secondary:.0f}% corr"),
@@ -1119,16 +1161,17 @@ def build_dashboard(
 
     # --- Panel 2: tachogram --------------------------------------------
     ax2 = fig.add_subplot(gs[2, :])
-    ax2.plot(proc.rr_t_s / 60.0, proc.rr_ms, lw=0.4, color="0.5", zorder=1)
+    rr_dt = local_dt_array(cfg, ecg, proc.rr_t_s)
+    ax2.plot(rr_dt, proc.rr_ms, lw=0.4, color="0.5", zorder=1)
     corr_rr_mask = proc.corrected_idx[1:]
-    ax2.scatter((proc.rr_t_s / 60.0)[corr_rr_mask], proc.rr_ms[corr_rr_mask],
+    ax2.scatter(rr_dt[corr_rr_mask], proc.rr_ms[corr_rr_mask],
                 s=6, color="red", zorder=3, label="corrected beat")
     ax2.axhline(cfg.rr_min_ms, color="k", ls=":", lw=0.6)
     ax2.axhline(cfg.rr_max_ms, color="k", ls=":", lw=0.6)
     ax2.set_ylim(0, max(cfg.rr_max_ms * 1.2, np.nanpercentile(proc.rr_ms, 99)))
     ax2.set_title("Tachogram (RR over time) — corrected beats in red, "
                   "pediatric bounds dotted")
-    ax2.set_xlabel("Time (min)")
+    _set_local_time_axis(ax2)
     ax2.set_ylabel("RR (ms)")
     ax2.legend(loc="upper right", fontsize=8)
     panel_caption(
@@ -1152,9 +1195,10 @@ def build_dashboard(
     ax3.axhline(cfg.accept_pct_secondary, color="green", ls="--",
                 label=f"{cfg.accept_pct_secondary:.0f}%")
     ax3.set_title("Artifact burden vs TIME OF DAY\n(do bad windows cluster?)")
-    ax3.set_xlabel("Hour of day (local)")
+    ax3.set_xlabel(f"Hour of day ({tz_abbr})")
     ax3.set_ylabel("% corrected beats")
     ax3.set_xlim(0, 24)
+    ax3.set_xticks(np.arange(0, 25, 2))
     ax3.legend(fontsize=8)
     panel_caption(
         ax3,
@@ -1164,16 +1208,16 @@ def build_dashboard(
 
     # --- Panel 4: artifact burden over elapsed time --------------------
     ax4 = fig.add_subplot(gs[3, 1])
-    ax4.plot(win_t, pct_corr, "-o", ms=3, color="0.3")
+    ax4.plot(win_dt, pct_corr, "-o", ms=3, color="0.3")
     ax4.axhline(cfg.accept_pct_primary, color="orange", ls="--",
                 label=f"{cfg.accept_pct_primary:.0f}% (primary)")
     ax4.axhline(cfg.accept_pct_secondary, color="green", ls="--",
                 label=f"{cfg.accept_pct_secondary:.0f}% (secondary)")
-    for ws in windows:
+    for i, ws in enumerate(windows):
         if ws.abpm_excluded:
-            ax4.axvspan(ws.t0_s / 60.0, ws.t1_s / 60.0, color="0.7", alpha=0.4)
+            ax4.axvspan(win_t0_dt[i], win_t1_dt[i], color="0.7", alpha=0.4)
     ax4.set_title("Per-window artifact burden over time")
-    ax4.set_xlabel("Time (min)")
+    _set_local_time_axis(ax4)
     ax4.set_ylabel("% corrected beats")
     ax4.legend(fontsize=8)
     panel_caption(
@@ -1184,10 +1228,10 @@ def build_dashboard(
     # --- Panel 5: per-window RMSSD, failed/excluded greyed -------------
     ax5 = fig.add_subplot(gs[4, 0])
     ok_mask = passed
-    ax5.scatter(win_t[~ok_mask], rmssd[~ok_mask], s=16, color="0.75", zorder=1)
-    ax5.scatter(win_t[ok_mask], rmssd[ok_mask], s=16, color="#1565c0", zorder=3)
+    ax5.scatter(win_dt[~ok_mask], rmssd[~ok_mask], s=16, color="0.75", zorder=1)
+    ax5.scatter(win_dt[ok_mask], rmssd[ok_mask], s=16, color="#1565c0", zorder=3)
     ax5.set_title("Per-window RMSSD (failed/excluded greyed)")
-    ax5.set_xlabel("Time (min)")
+    _set_local_time_axis(ax5)
     ax5.set_ylabel("RMSSD (ms)")
     panel_caption(
         ax5,
@@ -1261,11 +1305,11 @@ def build_dashboard(
             for ws in windows
         ])
         cat_color = {"at rest": "#2e7d32", "motion": "#8e24aa", "not worn": "#01579b"}
-        ax9.plot(win_t, motion_burden, lw=0.4, color="0.7", zorder=1)
+        ax9.plot(win_dt, motion_burden, lw=0.4, color="0.7", zorder=1)
         for cat, color in cat_color.items():
             m = cats == cat
             if m.any():
-                ax9.scatter(win_t[m], motion_burden[m], s=16, color=color, zorder=3, label=cat)
+                ax9.scatter(win_dt[m], motion_burden[m], s=16, color=color, zorder=3, label=cat)
         thresh_line = ax9.axhline(
             cfg.motion_flag_frac, color="purple", ls="--", lw=0.8,
             label=f"motion-flag threshold ({cfg.motion_flag_frac:.0%})",
@@ -1279,7 +1323,7 @@ def build_dashboard(
         ]
         ax9.legend(handles=handles, fontsize=7, loc="upper right", ncol=2)
         ax9.set_title("Accelerometry summary — motion burden per window")
-        ax9.set_xlabel("Time (min)")
+        _set_local_time_axis(ax9)
         ax9.set_ylabel("Motion burden\n(frac. of window > threshold)")
         ax9.set_ylim(-0.02, 1.02)
         panel_caption(
@@ -1298,7 +1342,8 @@ def build_dashboard(
     # PNG stays a single image (the dashboard only).
     fig.savefig(out_png, bbox_inches="tight")
     # PDF is two pages: the dashboard, then a "How to read this report" page.
-    expl_fig = _build_explanation_page(cfg, ecg, verdict, pct_total, pct_worn, windows)
+    expl_fig = _build_explanation_page(cfg, ecg, verdict, pct_total, pct_worn, windows,
+                                        serial_number)
     with PdfPages(out_pdf) as pdf:
         pdf.savefig(fig, bbox_inches="tight")
         pdf.savefig(expl_fig)
@@ -1322,6 +1367,7 @@ def write_outputs(
     pct_worn: float,
     out_json: Path,
     total_runtime_min: float,
+    serial_number: Optional[str],
 ) -> dict:
     section("STAGE 8 - Metrics (JSON + cross-deployment CSV + console)")
 
@@ -1357,6 +1403,7 @@ def write_outputs(
 
     metrics = {
         "deployment_id": cfg.deployment_id,
+        "serial_number": serial_number,
         "neurokit2_version": nk.__version__,
         "rng_seed": RNG_SEED,
         "generated_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -1433,6 +1480,7 @@ def write_outputs(
     print(f"  DEPLOYMENT QC SUMMARY — {cfg.deployment_id}    [{verdict}]")
     print("-" * 78)
     rows = [
+        ("serial number", serial_number or "not parseable from filename"),
         ("neurokit2", nk.__version__),
         ("sampling rate", f"{ecg.fs} Hz"),
         ("recording start", f"{start_local:%Y-%m-%d %H:%M:%S} {tz_abbr}"),
@@ -1510,9 +1558,18 @@ def main(argv: Optional[list[str]] = None) -> None:
     cfg.out_dir = args.out_dir
     cfg.limit_seconds = args.limit_seconds
 
+    serial_number = parse_serial_number(cfg.ecg_path)
+
     section(f"ECG QC DASHBOARD — {cfg.deployment_id}")
     announce(f"neurokit2 {nk.__version__}; RNG seed {RNG_SEED}")
     announce("This tool FLAGS quality; it never edits or drops raw data.")
+    if serial_number:
+        announce(f"Device serial number (parsed from filename): {serial_number}")
+    else:
+        announce(
+            "Device serial number: not parseable from filename "
+            "(expected a 12-digit prefix, e.g. '254530002246-log-...')."
+        )
     # Verify the nk API strings we depend on actually exist in this version.
     if "Kubios" not in str(nk.signal_fixpeaks.__doc__) and True:
         pass  # doc string varies; we rely on the call succeeding below.
@@ -1548,13 +1605,14 @@ def main(argv: Optional[list[str]] = None) -> None:
         cfg, ecg, proc, windows, abpm_windows, jitter, verdict, pct_total, pct_worn,
         out_dir / f"{stem}_dashboard.png", out_dir / f"{stem}_dashboard.pdf",
         elapsed_min=elapsed_min, accel_available=accel_available,
+        serial_number=serial_number,
     )
     _lap("Stage 7 (dashboard figure)")
     total_runtime_min = (time.time() - run_start) / 60.0
     write_outputs(
         cfg, ecg, proc, windows, abpm_windows, jitter, verdict, pct_total, pct_worn,
         out_dir / f"{stem}_metrics.json",
-        total_runtime_min=total_runtime_min,
+        total_runtime_min=total_runtime_min, serial_number=serial_number,
     )
     _lap("Stage 8 (metrics + outputs)")
     section(f"DONE — verdict: {verdict} "
