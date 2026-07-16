@@ -104,26 +104,32 @@ verdict:
 ------------------------------------------------------------------------------
   neurokit2                  0.2.13
   sampling rate              256 Hz
-  recording start            2026-07-10 06:25:55 UTC-04:00
-  recording end              2026-07-11 05:55:01 UTC-04:00
-  total duration              23.49 h
-  worn duration                23.07 h
-  % analyzable (total)       92.3%  <-- verdict driver
-  % analyzable (worn)        93.9%
-  N beats                    99,517
-  % corrected beats          1.62%
-  mean HR                    80 bpm (40-197)
-  RMSSD / SDNN               59.9 / 219.2 ms
-  windows pass@5% / total    260 / 282
-  windows pass@2% / total    257 / 282
+  recording start            2026-07-16 08:19:47 UTC
+  recording end              2026-07-17 07:41:03 UTC
+  total duration              23.35 h
+  worn duration                22.08 h  (94.6% of total)
+  % analyzable (of total time) 83.9%  <-- verdict driver
+  % analyzable (of worn time) 88.7%
+  N beats                    99,581
+  % corrected beats          2.84%
+  mean HR                    81 bpm (40-200)
+  RMSSD / SDNN               93.4 / 165.6 ms
+  windows pass@5% / total    235 / 280
+  windows pass@2% / total    215 / 280
   ...
+  total runtime               85.5 min
 ==============================================================================
-DONE — verdict: PASS (92% of total deployment analyzable; 94% of worn time)
+DONE — verdict: PASS (84% of total deployment analyzable; 89% of worn time)
 ==============================================================================
 ```
 
-`% analyzable (total)` — the share of the deployment's SQI-passing windows
-against the *whole* recording — drives the verdict: **PASS** (≥80%),
+`worn duration` and `% analyzable (of worn time)` answer different questions —
+worn duration is a share of the *whole recording*; the analyzable percentages
+are shares of their own denominator (total or worn), not of each other. Don't
+expect worn-duration-as-%-of-total to match `% analyzable (of worn time)`.
+
+`% analyzable (of total time)` — the share of the deployment's SQI-passing
+windows against the *whole* recording — drives the verdict: **PASS** (≥80%),
 **REVIEW** (50–80%), or **FAIL** (<50%). These thresholds live in the
 `Config` dataclass at the top of `01_qc_dashboard.py`, not behind a flag.
 

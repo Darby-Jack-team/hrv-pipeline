@@ -60,6 +60,7 @@ import argparse
 import json
 import sys
 import textwrap
+import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -919,14 +920,23 @@ def _build_explanation_page(
         ("Most-flagged-window beat overlay",
          "The same overlay for the worst window. Smeared or variable shapes flag "
          "motion artifact or detector error."),
+        ("Accelerometry summary",
+         "Per-window motion burden (fraction of the window with |accel magnitude "
+         "- 1g| over threshold). Green = at rest (breathing-level movement only); "
+         "purple = motion (consistent with physical activity); blue = not worn. "
+         "Only shown when an accelerometer file was provided."),
     ]
 
     verdict_logic = (
-        "Verdict logic: two analyzable percentages are reported. % of TOTAL "
-        "deployment (the PRIMARY number, which drives PASS/REVIEW/FAIL) measures "
-        "overall mission success - a device that fell off or was removed counts "
-        "against it. % of WORN time removes not-worn windows from the denominator "
-        "to isolate device/signal performance while on the body. "
+        "Verdict logic: two analyzable percentages are reported, and they answer "
+        "DIFFERENT questions -- do not divide worn duration by total duration and "
+        "expect it to match either one. % of TOTAL deployment (the PRIMARY number, "
+        "which drives PASS/REVIEW/FAIL) measures overall mission success - a device "
+        "that fell off or was removed counts against it. % of WORN time removes "
+        "not-worn windows from the denominator to isolate device/signal performance "
+        "while on the body -- it is analyzable-seconds / worn-seconds, NOT "
+        "worn-seconds / total-seconds (that ratio is reported separately as "
+        "'worn duration' with its own % of total). "
         f"PASS >= {cfg.pass_analyzable_pct:.0f}%, "
         f"REVIEW >= {cfg.review_analyzable_pct:.0f}%, else FAIL, on the TOTAL "
         "number. A window is analyzable when it passes the primary corrected-beat "
@@ -995,6 +1005,8 @@ def build_dashboard(
     pct_worn: float,
     out_png: Path,
     out_pdf: Path,
+    elapsed_min: float,
+    accel_available: bool,
 ) -> None:
     section("STAGE 7 - Dashboard figure")
     banner_color = {"PASS": "#2e7d32", "REVIEW": "#f9a825", "FAIL": "#c62828"}[verdict]
@@ -1004,7 +1016,7 @@ def build_dashboard(
     fig = plt.figure(figsize=(16, 21), dpi=cfg.figure_dpi)
     # Extra hspace gives the per-panel captions room not to collide with the
     # next panel's title.
-    gs = fig.add_gridspec(6, 2, height_ratios=[0.5, 1, 1, 1, 1.2, 1.2], hspace=0.65,
+    gs = fig.add_gridspec(7, 2, height_ratios=[0.5, 1, 1, 1, 1.2, 1.2, 1], hspace=0.65,
                           wspace=0.18)
 
     # --- Banner ---------------------------------------------------------
@@ -1021,8 +1033,8 @@ def build_dashboard(
     )
     axb.text(
         0.99, 0.70,
-        f"{cfg.deployment_id}   |   {pct_total:.0f}% of total analyzable   |   "
-        f"{pct_worn:.0f}% of worn time   |   "
+        f"{cfg.deployment_id}   |   {pct_total:.0f}% analyzable of total   |   "
+        f"{pct_worn:.0f}% analyzable of worn time   |   "
         f"nk {nk.__version__}   |   fs={ecg.fs} Hz   ",
         transform=axb.transAxes, va="center", ha="right",
         fontsize=12, color="white",
@@ -1030,7 +1042,8 @@ def build_dashboard(
     axb.text(
         0.99, 0.28,
         f"recorded {start_local:%Y-%m-%d %H:%M:%S} → "
-        f"{end_local:%Y-%m-%d %H:%M:%S} {tz_abbr}   ",
+        f"{end_local:%Y-%m-%d %H:%M:%S} {tz_abbr}   |   "
+        f"processed in {elapsed_min:.1f} min   ",
         transform=axb.transAxes, va="center", ha="right",
         fontsize=11, color="white",
     )
@@ -1233,6 +1246,50 @@ def build_dashboard(
         axo.set_ylabel("ECG")
         panel_caption(axo, overlay_caption[col])
 
+    # --- Panel 9: accelerometry summary (motion vs rest) ----------------
+    ax9 = fig.add_subplot(gs[6, :])
+    if not accel_available:
+        ax9.text(
+            0.5, 0.5, "No accelerometer data provided (--no-accel, or no --accel path given)",
+            ha="center", va="center", transform=ax9.transAxes, color="0.4", fontsize=11,
+        )
+        ax9.axis("off")
+    else:
+        motion_burden = np.array([ws.motion_burden for ws in windows])
+        cats = np.array([
+            "not worn" if ws.not_worn else "motion" if ws.motion_flagged else "at rest"
+            for ws in windows
+        ])
+        cat_color = {"at rest": "#2e7d32", "motion": "#8e24aa", "not worn": "#01579b"}
+        ax9.plot(win_t, motion_burden, lw=0.4, color="0.7", zorder=1)
+        for cat, color in cat_color.items():
+            m = cats == cat
+            if m.any():
+                ax9.scatter(win_t[m], motion_burden[m], s=16, color=color, zorder=3, label=cat)
+        thresh_line = ax9.axhline(
+            cfg.motion_flag_frac, color="purple", ls="--", lw=0.8,
+            label=f"motion-flag threshold ({cfg.motion_flag_frac:.0%})",
+        )
+        n_tot = len(cats)
+        pct = {c: 100.0 * int((cats == c).sum()) / n_tot if n_tot else 0.0
+               for c in cat_color}
+        handles = [thresh_line] + [
+            Patch(color=color, label=f"{cat} ({pct[cat]:.0f}% of windows)")
+            for cat, color in cat_color.items()
+        ]
+        ax9.legend(handles=handles, fontsize=7, loc="upper right", ncol=2)
+        ax9.set_title("Accelerometry summary — motion burden per window")
+        ax9.set_xlabel("Time (min)")
+        ax9.set_ylabel("Motion burden\n(frac. of window > threshold)")
+        ax9.set_ylim(-0.02, 1.02)
+        panel_caption(
+            ax9,
+            "Per-window fraction of samples with |accel magnitude - 1g| > "
+            f"{cfg.motion_dev_thresh_g:.2f} g. Green = at rest (breathing-level "
+            "movement only, consistent with sitting/lying still); purple = motion "
+            "(consistent with physical activity); blue = not worn.",
+        )
+
     fig.suptitle(
         f"ECG QC dashboard — {cfg.deployment_id}",
         fontsize=16, fontweight="bold", y=0.995,
@@ -1264,6 +1321,7 @@ def write_outputs(
     pct_total: float,
     pct_worn: float,
     out_json: Path,
+    total_runtime_min: float,
 ) -> dict:
     section("STAGE 8 - Metrics (JSON + cross-deployment CSV + console)")
 
@@ -1282,8 +1340,16 @@ def write_outputs(
     flatline_s = sum(ws.valid_duration_s for ws in windows if ws.flatline)
     not_worn_s = sum(ws.valid_duration_s for ws in windows if ws.not_worn)
     worn_s = sum(ws.valid_duration_s for ws in windows if not ws.not_worn)
+    # at_rest = worn AND not motion-flagged (breathing-level movement only).
+    at_rest_s = sum(
+        ws.valid_duration_s for ws in windows if not ws.not_worn and not ws.motion_flagged
+    )
     n_flatline = sum(ws.flatline for ws in windows)
     n_not_worn = sum(ws.not_worn for ws in windows)
+    # Share of the TOTAL recording the device was worn -- distinct from
+    # pct_analyzable_worn (share of WORN time that is analyzable). Reported
+    # separately so the two aren't conflated (they answer different questions).
+    worn_pct_of_total = 100.0 * worn_s / ecg.duration_s if ecg.duration_s else 0.0
     pct_corrected_overall = (
         100.0 * int(proc.corrected_idx.sum()) / len(proc.corrected_idx)
         if len(proc.corrected_idx) else float("nan")
@@ -1301,6 +1367,9 @@ def write_outputs(
         "total_duration_s": round(ecg.duration_s, 1),
         "effective_duration_s": round(ecg.duration_s - abpm_excl_s, 1),
         "worn_duration_s": round(worn_s, 1),
+        # % of the TOTAL recording the device was worn -- NOT the same question
+        # as pct_analyzable_worn (% of WORN time that is analyzable quality).
+        "worn_pct_of_total": round(worn_pct_of_total, 2),
         "gap_total_s": round(ecg.gap_total_s, 1),
         # pct_analyzable_total is the PRIMARY verdict number (mission success);
         # pct_analyzable_worn isolates device/signal performance while on the body.
@@ -1308,6 +1377,7 @@ def write_outputs(
         "pct_analyzable_worn": round(pct_worn, 2),
         "pct_analyzable": round(pct_total, 2),  # back-compat alias = total
         "verdict": verdict,
+        "total_runtime_min": round(total_runtime_min, 2),
         "n_beats": int(len(proc.corrected_peaks)),
         "pct_corrected_beats": round(pct_corrected_overall, 3),
         "mean_hr_bpm": round(float(np.nanmean(hr)), 1),
@@ -1322,6 +1392,7 @@ def write_outputs(
         "n_windows_fail_2pct": n_total - n_pass2,
         "abpm_excluded_s": round(abpm_excl_s, 1),
         "motion_flagged_s": round(motion_s, 1),
+        "at_rest_s": round(at_rest_s, 1),
         "flatline_s": round(flatline_s, 1),
         "not_worn_s": round(not_worn_s, 1),
         "n_windows_flatline": int(n_flatline),
@@ -1367,9 +1438,9 @@ def write_outputs(
         ("recording start", f"{start_local:%Y-%m-%d %H:%M:%S} {tz_abbr}"),
         ("recording end", f"{end_local:%Y-%m-%d %H:%M:%S} {tz_abbr}"),
         ("total duration", f"{ecg.duration_s / 3600:.2f} h"),
-        ("worn duration", f"{worn_s / 3600:.2f} h"),
-        ("% analyzable (total)", f"{pct_total:.1f}%  <-- verdict driver"),
-        ("% analyzable (worn)", f"{pct_worn:.1f}%"),
+        ("worn duration", f"{worn_s / 3600:.2f} h  ({worn_pct_of_total:.1f}% of total)"),
+        ("% analyzable (of total time)", f"{pct_total:.1f}%  <-- verdict driver"),
+        ("% analyzable (of worn time)", f"{pct_worn:.1f}%"),
         ("N beats", f"{metrics['n_beats']:,}"),
         ("% corrected beats", f"{metrics['pct_corrected_beats']:.2f}%"),
         ("mean HR", f"{metrics['mean_hr_bpm']:.0f} bpm "
@@ -1380,10 +1451,12 @@ def write_outputs(
         ("windows pass@2% / total", f"{n_pass2} / {n_total}"),
         ("ABPM excluded", f"{abpm_excl_s / 60:.1f} min"),
         ("motion flagged", f"{motion_s / 60:.1f} min"),
+        ("at rest (worn, low motion)", f"{at_rest_s / 60:.1f} min"),
         ("lead-off/flatline", f"{flatline_s / 60:.1f} min ({n_flatline} win)"),
         ("not worn", f"{not_worn_s / 60:.1f} min ({n_not_worn} win)"),
         ("RMSSD @ sigma=10ms", f"{jitter.rmssd_overall[-1]:.1f} ms "
                                f"({jitter.pct_change[-1]:+.0f}% vs 0)"),
+        ("total runtime", f"{total_runtime_min:.1f} min"),
     ]
     for k, v in rows:
         print(f"  {k:<26} {v}")
@@ -1444,27 +1517,50 @@ def main(argv: Optional[list[str]] = None) -> None:
     if "Kubios" not in str(nk.signal_fixpeaks.__doc__) and True:
         pass  # doc string varies; we rely on the call succeeding below.
 
+    run_start = time.time()
+    t_prev = run_start
+
+    def _lap(label: str) -> None:
+        nonlocal t_prev
+        now = time.time()
+        announce(f"[TIMING] {label}: {now - t_prev:.1f}s")
+        t_prev = now
+
     ecg = load_and_validate_ecg(cfg)
+    _lap("Stage 0 (load & validate ECG)")
     accel = load_accel(cfg, ecg)
+    accel_available = accel is not None
     abpm_windows = build_abpm_windows(cfg, ecg)
+    _lap("accel load + ABPM windows")
     proc = process_ecg(cfg, ecg)
+    _lap("Stage 1-4 (clean, SQI, peaks, RR correction)")
     windows = compute_windows(cfg, ecg, proc, abpm_windows, accel)
+    _lap("Stage 5 (per-window QC)")
     jitter = jitter_sensitivity(cfg, ecg, proc)
+    _lap("Stage 6 (jitter sensitivity)")
     verdict, pct_total, pct_worn = overall_verdict(cfg, windows)
+
+    elapsed_min = (time.time() - run_start) / 60.0
 
     out_dir = Path(cfg.out_dir)
     stem = cfg.deployment_id
     build_dashboard(
         cfg, ecg, proc, windows, abpm_windows, jitter, verdict, pct_total, pct_worn,
         out_dir / f"{stem}_dashboard.png", out_dir / f"{stem}_dashboard.pdf",
+        elapsed_min=elapsed_min, accel_available=accel_available,
     )
+    _lap("Stage 7 (dashboard figure)")
+    total_runtime_min = (time.time() - run_start) / 60.0
     write_outputs(
         cfg, ecg, proc, windows, abpm_windows, jitter, verdict, pct_total, pct_worn,
         out_dir / f"{stem}_metrics.json",
+        total_runtime_min=total_runtime_min,
     )
+    _lap("Stage 8 (metrics + outputs)")
     section(f"DONE — verdict: {verdict} "
             f"({pct_total:.0f}% of total deployment analyzable; "
-            f"{pct_worn:.0f}% of worn time)")
+            f"{pct_worn:.0f}% of worn time) "
+            f"— total runtime {total_runtime_min:.1f} min")
 
 
 if __name__ == "__main__":
