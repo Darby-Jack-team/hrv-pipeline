@@ -980,7 +980,7 @@ def _build_explanation_page(
         ("Accelerometry summary",
          "Per-window motion burden (fraction of the window with |accel magnitude "
          "- 1g| over threshold). Green = at rest (breathing-level movement only); "
-         "purple = motion (consistent with physical activity); blue = not worn. "
+         "purple = motion (consistent with physical activity); red = not worn. "
          "Only shown when an accelerometer file was provided."),
     ]
 
@@ -1345,7 +1345,7 @@ def build_dashboard(
             "not worn" if ws.not_worn else "motion" if ws.motion_flagged else "at rest"
             for ws in windows
         ])
-        cat_color = {"at rest": "#2e7d32", "motion": "#8e24aa", "not worn": "#01579b"}
+        cat_color = {"at rest": "#2e7d32", "motion": "#8e24aa", "not worn": "#c62828"}
         ax9.plot(win_dt, motion_burden, lw=0.4, color="0.7", zorder=1)
         for cat, color in cat_color.items():
             m = cats == cat
@@ -1372,7 +1372,7 @@ def build_dashboard(
             "Per-window fraction of samples with |accel magnitude - 1g| > "
             f"{cfg.motion_dev_thresh_g:.2f} g. Green = at rest (breathing-level "
             "movement only, consistent with sitting/lying still); purple = motion "
-            "(consistent with physical activity); blue = not worn.",
+            "(consistent with physical activity); red = not worn.",
         )
 
     fig.suptitle(
